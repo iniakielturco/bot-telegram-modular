@@ -2,19 +2,19 @@
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ContextTypes
 from data_manager import BinanceClient, DataManager
-from utils import format_price
+from utils import format_price, smart_split
+from alerts import format_close_table # <--- Importamos la lógica de alertas
 import config
 
 # --- COMANDO START ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Envía el panel de control simplificado."""
-    # Verificamos si está activo para mostrar el botón correcto
+    """Envía el panel de control actualizado."""
     is_active = config.BOT_STATE.get("active", True)
     toggle_text = "🔴 PAUSAR BOT" if is_active else "🟢 ACTIVAR BOT"
     
     keyboard = [
         ["👀 VER AHORA", toggle_text],
-        ["💰 PRECIOS TABLA", "❓ AYUDA"]
+        ["🔥 ZONA DE DISPARO", "❓ AYUDA"] # <--- Botón Nuevo
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     
@@ -29,7 +29,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup, 
         parse_mode='Markdown'
     )
-    # Nos aseguramos de inicializar el estado
     if "active" not in config.BOT_STATE:
         config.BOT_STATE["active"] = True
 
@@ -38,9 +37,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "📚 **AYUDA** 📚\n\n"
         "• **🟢 ACTIVAR / 🔴 PAUSAR:** Enciende o apaga el escaneo automático.\n"
-        "• **👀 VER AHORA:** Fuerza un escaneo manual instantáneo (funciona aunque esté pausado).\n"
-        "• **💰 PRECIOS TABLA:** Lista rápida de precios.\n"
-        "• **AUTO:** El bot cambia solo la frecuencia según la hora (10m de día / 60m de noche)."
+        "• **👀 VER AHORA:** Informe completo (Tabla + Alertas).\n"
+        "• **🔥 ZONA DE DISPARO:** Muestra SOLO las operaciones cercanas o en rango.\n"
+        "• **AUTO:** El bot cambia solo la frecuencia (10m/60m)."
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
@@ -65,9 +64,12 @@ async def price_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(f"❌ No encontré {symbol}")
 
-# --- PRECIOS DE LA TABLA ---
-async def check_all_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔎 Consultando precios...")
+# --- NUEVO: SOLO ZONA DE DISPARO ---
+async def check_fire_zone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Escanea y envía SOLO las alertas de la Zona de Disparo."""
+    await update.message.reply_text("🔥 Analizando Zona de Disparo...")
+    
+    # 1. Obtener Datos
     dm = DataManager()
     df = dm.get_pending_operations()
     
@@ -75,6 +77,7 @@ async def check_all_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Tabla vacía.")
         return
 
+    # 2. Obtener Precios
     symbols = df['Symbol'].unique().tolist()
     bc = BinanceClient()
     market_data = bc.get_market_prices(symbols)
@@ -83,15 +86,9 @@ async def check_all_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Error Binance.")
         return
         
-    lines = ["💰 **PRECIOS ACTUALES** 💰", ""]
-    for symbol in symbols:
-        data = market_data.get(symbol)
-        if data:
-            price = format_price(data['price'])
-            change = data['change_percent']
-            icon = "🟢" if change >= 0 else "🔴"
-            sign = "+" if change >= 0 else ""
-            lines.append(f"{icon} **{symbol}**: ${price} ({sign}{change}%)")
-            
-    msg = "\n".join(lines)
-    await update.message.reply_text(msg, parse_mode='Markdown')
+    # 3. Generar SOLO el mensaje de alertas
+    msg_cercana = format_close_table(df, market_data)
+    
+    # 4. Enviar
+    for chunk in smart_split(msg_cercana):
+        await update.message.reply_text(chunk, parse_mode='Markdown', disable_web_page_preview=True)
